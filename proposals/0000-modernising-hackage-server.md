@@ -1,3 +1,9 @@
+TODO:
+
+* [ ] add details about the migration steps and requirements.
+* [ ] add details if it's feasible to move only packagedb related parts to a relational database.
+* [ ] something about the security
+
 # Community Project Template \- Modernising Hackage Server
 
 ## Abstract
@@ -42,7 +48,6 @@ The last but not the least problem with `acid-state`, is that `acid-state` coupl
 
 The codebase is further burdened by significant architectural technical debt beyond the primary data model and persistence issues. Although various aspects of the server could remain as they are, addressing the following liabilities during any modernization effort is highly advisable:
 
-* HTML is generated manually throughout, as opposed to being a structured, templated system. This means it is prohibitively expensive to do any sort of modernizing of the generated documents, despite them conceptually being simple projections of the data.
 * Background tasks (e.g. haddock generation, email notifications, and running backups) are implemented via custom implementation of the cron daemon to schedule things like email notification and backups. Existing cron implementations solve the problem in all nuances and do not require a custom solution.
 * Search is handled by a non-trivial implementation nearing 1000 LOC, with basic features and no tests, where better supported implementations are available.
 * Arbitrary functionality is implemented via opaque `IO ()` callback hooks, making control flow hard to follow.
@@ -79,25 +84,27 @@ The Hackage Server V2 project represents a *complete rewrite* of the existing in
 
 ### Architecture
 
-A reverse proxy sits in front of both systems throughout the migration. `hackage-server` never needs to know the new system exists. No patches to the upstream repository are required.
+`hackage-server-v2` sits in front of `hackage-server` during the migration, proxying all requests to it if they are not yet implemented in v2, or if v2 experiences an exception.
 
 Diagram 1\.
 
-```
+``` txt
 
-                                   +~~~~~~~~~~~~~~~~+
-                              +----> hackage-server +----+    +-------------------+
-+--------+      +~~~~~~~~+    |    +~~~~~~~~~~~~~~~~+    |    |                   |
-| fastly +------> proxy  +----+                          +---->    File storage   |
-|  CDN   |      +~~~+~~~~+    |    +-------------------+ |    |                   |
-+--------+          |         +----> hackage-server-v2 +-+    +-------------------+
-                    |              +--------+----------+
-                    |                       |
-               Conformance testing          |       +------------------+
-                                            |       |                  |
-                                            +------->   Postgres DB    |
-                                                    |                  |
-                                                    +------------------+
+              +-----------+                    +------+
+              |    CAS    |<-------------------| CAS  |
+              +-----------+    live migration  +------+
+                    |                             |
++--------+   +------+------------+   +------------+---+
+| fastly +---> hackage-server-v2 +---> hackage-server +
+|  CDN   |   +---+----+----------+   +----------------+
++--------+       |    |
+            +----+    |
+            |         |
+            v         |       +------------------+
+       conformace     |       |                  |
+          test        +------->   Postgres DB    |
+                              |                  |
+                              +------------------+
 
 ```
 
@@ -105,8 +112,7 @@ Diagram 1\.
 
 Components (first new components, then already existing):
 
-* **Proxy**, (temporary component) is a programmable proxy that redirects the requests between `hackage-server` implementations (see migration), and also allows to verify replies from the server based on the migration stage, including, but not limited to sending requests to both servers and compares the responses.
-* **hackage-server-v2** — new implementation.
+* **hackage-server-v2** — new implementation, consisting of the newly implemented endpoint, and programmable proxy that passed all the unknown requests to the existing `hackage-server`.
 * **Postgres DB** — new component, a relational database where all current `hackage-server` state will be stored.
 * **hackage-server** — (temporary component) current implementation that can remain unchanged on the course of all migrations.
 * **fastly CDN** — a transparent caching layer that sits in front of the hackage server and serves static data (exists in the current architecture).
@@ -122,7 +128,13 @@ Components (first new components, then already existing):
 
 #### Hackage server v2
 
-Our new implementation, as proposed above.
+Our new implementation, as proposed above. All unknown requests are redirected to the existing hackage-server. All blob data is stored on content addressible storage, at this point we plan to use a solution that provide a filesystem like interface, we expect to use filesystem in the first step, but later it can be replaced by the FUSE that connects filesystem to S3 compatible storage.
+
+To keep files up to date during the migration process we will keep live synchronisation using [lsync](https://github.com/lsyncd/lsyncd), that would allow to synchronize files, no matter how they were created, using upload, or by the background tasks.
+
+Alternative solution is too use polling to fetch updates from the `hackage-server-v2`, the final solution will be chosen in cooperation with admin team based on security concerns and available options, as during the migration `hackage-server-v2` and `hackage-server` could be located in a different datacentres.
+
+Fallback scenario that redirects requests from the `hackage-server-v2` to `hackage-server` when the file is not found will cover race conditions when file was not yet uploaded to `hackage-server-v2`. This fallback will be disabled once migration is complete.
 
 #### Postgres DB
 
@@ -131,6 +143,14 @@ A database layer solution that keeps all the state. We chose Postgres for severa
 1. It’s a relational database and all the hackage state can be represented in a relation model, as was previously shown by stackage-server and flora PM. The relational model allows us to have a fast and efficient search model.
 2. Postgres is a production grade database that is known as a good default for haskell applications and has multiple client libraries of the production quality.
 3. Postgres contains multiple tools that cover observability, and reliability requirements and supports full text search out of the box. Many features of `hackage-server` v1 are functionality already provided directly by postgres; e.g. fulltext search, backups and pagination. These three features alone account for roughly 12% of the existing implementation of v1.
+4. For the database migration we propose to use [sqitch](https://sqitch.org) library, that is a battle tested solution for migrations.
+
+#### Physical locations
+
+During the migration two boxes will be used:
+
+1. Old physical box where `hackage-server` had been running, on this node we plan to keep hackage-server-v2, new storage and Postgres
+2. Exising cloud solution for `hackage-server` is running, this box can be retired once migration is completed.
 
 #### Why Servant?
 
@@ -142,7 +162,7 @@ The natural response to a problematic codebase is incremental improvement: intro
 
 The core data structure of `hackage-server` is approximately:
 
-```
+``` haskell
 Map
   PackageName
   [ ( PackageIdentifier
@@ -198,6 +218,8 @@ We propose that the new system be owned by the Haskell Foundation from day one, 
 
 This structure also provides the long-term stability guarantee that the ecosystem requires: the system's continued operation does not depend on any single organization's continued involvement.
 
+During the development all the code including draft patches and PR will be publicly open for external security reviews. The team will follow the best practices and do both manual and automatic reviews of all changes.
+
 ### Considered Alternatives
 
 #### Scale Horizontally Anyway
@@ -213,6 +235,14 @@ One possibility involves implementing a shim layer over `acid-state`. While this
 Furthermore, the `acid-state` data model is inherently poorly suited for relational systems. This would force a choice between two suboptimal paths: storing serialized Haskell structures inefficiently or developing a complex, bespoke ORM for the legacy types.
 
 Ultimately, this strategy is viewed as myopic; despite the considerable engineering effort required, it fails to resolve the underlying architectural issues.
+
+#### Move packagedb to relational database, continue using `acid-state` for userdb
+
+We could define a milestone around migrating only the package database. At that point, the packagedb implementation in hackage-server could be retired, reducing memory usage and addressing the most immediate operational concerns.
+
+However, this partial migration would leave many of the underlying architectural issues unchanged. As discussed in *Why Incremental Refactoring is not Feasible*, the current codebase has deep coupling between persistence, I/O, and application logic. These boundaries are not cleanly separated, which makes incremental migration costly: significant refactoring effort is required even for narrowly scoped changes.
+
+As a result, migrating only the packagedb would require much of the work associated with a broader redesign while delivering only a subset of the benefits. For this reason, we propose implementing the complete solution and migrating all package-related data to PostgreSQL rather than pursuing an intermediate state that would likely need to be revisited later.
 
 ## Timeline
 
@@ -236,5 +266,6 @@ The initiative will be deemed a success upon the effective migration and subsequ
 
 # Appendices
 
-- [Appendix 1: scope of refactoring](./0000-modernising-hackage-server/appendix1-scope-of-refactoring-work.md)
-- [Appendix 2: existing routes](./0000-modernising-hackage-server/appendix2-existing-routes.md)
+* [Appendix 1: scope of refactoring](./0000-modernising-hackage-server/appendix1-scope-of-refactoring-work.md)
+* [Appendix 2: existing routes](./0000-modernising-hackage-server/appendix2-existing-routes.md)
+* [Appendix 3: scope of changing only packagedb](./0000-modernising-hackage-server/appendix3-scope-of-pkgdb.md)

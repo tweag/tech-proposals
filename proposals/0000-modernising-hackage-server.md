@@ -77,14 +77,14 @@ Before proposing this project at Tweag we approached this problem using the iter
 
 We propose a complete rewrite of `hackage-server`, into the following form. Although full rewrites are often hard to justify it is our opinion that this is the best approach forwards (see “Why Incremental Refactoring Is Not Feasible” and “Correctness Guarantees” for the specific details.)
 
-The Hackage Server V2 project represents a *complete rewrite* of the existing infrastructure, utilizing contemporary Haskell libraries and development methodologies. This new version is architected into two primary segments:
+The Hackage Server V3 project represents a *complete rewrite* of the existing infrastructure, utilizing contemporary Haskell libraries and development methodologies. This new version is architected into two primary segments:
 
 * **The `hackage-api` library:** A new library featuring a Servant-based type definition that outlines the entire API surface. This component is designed to facilitate automatic bindings for modern downstream clients, as well as a machine-checkable specification for the actual implementation.
 * **The `hackage-server` core:** A modernized implementation that replaces the legacy persistence layer with a PostgreSQL data store.
 
 ### Architecture
 
-`hackage-server-v2` sits in front of `hackage-server` during the migration, proxying all requests to it if they are not yet implemented in v2, or if v2 experiences an exception.
+`hackage-server-v3` sits in front of `hackage-server` during the migration, proxying all requests to it if they are not yet implemented in v3, or if v3 experiences an exception.
 
 Diagram 1\.
 
@@ -95,7 +95,7 @@ Diagram 1\.
               +-----------+    live migration  +------+
                     |                             |
 +--------+   +------+------------+   +------------+---+
-| fastly +---> hackage-server-v2 +---> hackage-server +
+| fastly +---> hackage-server-v3 +---> hackage-server +
 |  CDN   |   +---+----+----------+   +----------------+
 +--------+       |    |
             +----+    |
@@ -112,29 +112,21 @@ Diagram 1\.
 
 Components (first new components, then already existing):
 
-* **hackage-server-v2** — new implementation, consisting of the newly implemented endpoint, and programmable proxy that passed all the unknown requests to the existing `hackage-server`.
+* **hackage-server-v3** — new implementation, consisting of the newly implemented endpoint, and programmable proxy that passed all the unknown requests to the existing `hackage-server`.
 * **Postgres DB** — new component, a relational database where all current `hackage-server` state will be stored.
 * **hackage-server** — (temporary component) current implementation that can remain unchanged on the course of all migrations.
 * **fastly CDN** — a transparent caching layer that sits in front of the hackage server and serves static data (exists in the current architecture).
 * **file storage**— storage where all the files, archives, documentation etc. are stored (exists in the current architecture).
 
-#### Proxy
+#### Hackage server v3
 
- A reverse proxy implemented in Haskell that for each route:
-
-* Unmigrated routes proxy exclusively to `hackage-server`.
-* Migrated read routes proxy to the new system, with fallback to `hackage-server` on error.
-* Write routes duplicate to both systems during the dual-write period (Phase 3 below).
-
-#### Hackage server v2
-
-Our new implementation, as proposed above. All unknown requests are redirected to the existing hackage-server. All blob data is stored on content addressible storage, at this point we plan to use a solution that provide a filesystem like interface, we expect to use filesystem in the first step, but later it can be replaced by the FUSE that connects filesystem to S3 compatible storage.
+Our new implementation, as proposed above. All unknown requests are redirected to the existing `hackage-server`. All blob data is stored on content addressible storage, at this point we plan to use a solution that provide a filesystem like interface, we expect to use filesystem in the first step, but later it can be replaced by the FUSE that connects filesystem to S3 compatible storage.
 
 To keep files up to date during the migration process we will keep live synchronisation using [lsync](https://github.com/lsyncd/lsyncd), that would allow to synchronize files, no matter how they were created, using upload, or by the background tasks.
 
-Alternative solution is too use polling to fetch updates from the `hackage-server-v2`, the final solution will be chosen in cooperation with admin team based on security concerns and available options, as during the migration `hackage-server-v2` and `hackage-server` could be located in a different datacentres.
+Alternative solution is too use polling to fetch updates from the `hackage-server-v3`, the final solution will be chosen in cooperation with admin team based on security concerns and available options, as during the migration `hackage-server-v3` and `hackage-server` could be located in a different datacentres.
 
-Fallback scenario that redirects requests from the `hackage-server-v2` to `hackage-server` when the file is not found will cover race conditions when file was not yet uploaded to `hackage-server-v2`. This fallback will be disabled once migration is complete.
+Fallback scenario that redirects requests from the `hackage-server-v3` to `hackage-server` when the file is not found will cover race conditions when file was not yet uploaded to `hackage-server-v3`. This fallback will be disabled once migration is complete.
 
 #### Postgres DB
 
@@ -149,8 +141,10 @@ A database layer solution that keeps all the state. We chose Postgres for severa
 
 During the migration two boxes will be used:
 
-1. Old physical box where `hackage-server` had been running, on this node we plan to keep hackage-server-v2, new storage and Postgres
+1. Old physical box where `hackage-server` had been running, on this node we plan to keep `hackage-server-v3`, new storage and Postgres
 2. Exising cloud solution for `hackage-server` is running, this box can be retired once migration is completed.
+
+During the implementation existing approach to packaging and deployment will be used. By default Tweag will provide haskell hackages and nix derivations for setting the system as a reasonable basis. But we plan to contact and use the system that is preferred by the Hackage infrastructure team.
 
 #### Why Servant?
 
@@ -181,7 +175,7 @@ This severe architectural constraint forces any attempt at modifying the databas
 
 The core issue is the IO boundary. Replacing `acid-state` with a real database requires IO, but the existing codebase assumes pure access to the full application state. Consequently, the first alternative leaves performance bottlenecks unaddressed, while the second requires very substantial engineering investment (see Appendix 1 for a thorough estimate of what needs to change, and how.)
 
-Additional complexity arises from the fact that the two maintainers of `hackage-server` as listed in the cabal file haven't authored any commits since 2016 and 2013, respectively. The copyright field hasn't been updated since 2015\. There is no changelog. The original authors are no longer involved. The current maintainers did not write the system. There is little-to-no documentation of the architectural invariants, no record of why key decisions were made, and no single person who holds a complete mental model of how the pieces fit together.
+Additional complexity arises from the fact that the two maintainers of `hackage-server` as listed in the cabal file haven't authored any commits since 2016 and 2013, respectively. There is no changelog. The original authors are no longer involved. The current maintainers did not write the system. There is little-to-no documentation of the architectural invariants, no record of why key decisions were made, and no single person who holds a complete mental model of how the pieces fit together.
 
 As [Naur discusses](https://pages.cs.wisc.edu/~remzi/Naur.pdf), it is the "theory" of the software that is important, much more so than the artifact
 itself. Without the theory, no significant changes can be made. The git history bears this out; with the exception of TUF and minor UI changes, no real features have been added to `hackage-server` since 2017\.
@@ -194,19 +188,19 @@ Critically, this approach requires no changes to any downstream clients whatsoev
 
 ### Migration Sequence
 
-For the migration we 5 distinct phases:
+For the migration we plan 5 distinct phases:
 
 **Phase 1: Immutable content \-** Package tarballs are content-addressed and immutable. Serving these from the new system first is zero-risk, immediately proves the infrastructure, and represents a significant fraction of total request volume.
 
 **Phase 2: Read-only structured data** \- Package metadata endpoints, the `.cabal` file endpoint, and other machine-readable structured data. During this phase, responses from both systems are compared and divergence is treated as a bug in the new implementation. To provide a better guarantee we plan to have dual reads, with verification of the results and switch to the new hackage only after we are confident that new replies are correct (see Correctness Guarantees).
 
-**Phase 3: Dual writes** \- All state-mutating endpoints — uploads, revisions, maintainer changes, trustee actions, deprecations — write to both systems. The old system remains primary. This phase begins before the backfill.
+**Phase 3: Dual writes** \- All state-mutating endpoints — uploads, revisions, maintainer changes, trustee actions, deprecations — write to both systems. The old system remains primary. This phase begins before the backfill. At this point `hackage-server` remains the source of truth, all updates are committed to `hackage-server-v3` only after a confirmation that `hackage-server` has completed processing of the request.
 
 **Phase 4: Backfill and sync** \- Historical data is backfilled into the new system's Postgres database. Because dual-writes began before the backfill, the two databases are guaranteed to converge: once the backfill reaches the point in time at which dual-writes started, the systems are in sync by construction and remain so. There is no write freeze, no coordinated cutover moment, and no race against live traffic.
 
 **Phase 5: Cutover and retirement \-** Reads are switched to the new system. `hackage-server` is drained and retired.
 
-This approach may look too superfluous, but it provides all required guarantees and is fully trackable by the community and allows to introduce changes earlier if required.
+This approach may look too superfluous, but it provides all required guarantees and is fully trackable by the community and allows to introduce changes earlier if required. In the worst case scenario load on hackage-server will be reduced at the end of Phase 4. But we expect that we can start reducing the load on the hackage-server starting with the Phase 3. The proposal does not state it as a fact, because it depends on the implementation and details, research of all the details in advance will be comparable with a big portion of work that needs to be done during the proposal.
 
 ### Correctness Guarantees
 
